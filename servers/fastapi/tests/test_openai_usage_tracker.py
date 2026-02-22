@@ -99,10 +99,10 @@ def test_openai_usage_tracker_chat_pricing_and_cached_tokens():
     assert summary.usage.reasoning_output_tokens == 25
 
     # gpt-5.2 defaults:
-    # uncached_input: 800 * 2.0 / 1e6 = 0.0016
-    # cached_input:   200 * 0.5 / 1e6 = 0.0001
-    # output:         500 * 8.0 / 1e6 = 0.004
-    assert summary.cost.total_usd == 0.0057
+    # uncached_input: 800 * 1.75  / 1e6 = 0.0014
+    # cached_input:   200 * 0.175 / 1e6 = 0.000035
+    # output:         500 * 14.0  / 1e6 = 0.007
+    assert summary.cost.total_usd == 0.008435
     assert summary.unpriced_models == []
 
 
@@ -132,10 +132,10 @@ def test_openai_usage_tracker_image_modal_pricing():
     assert summary.usage.output_image_tokens == 250
 
     # gpt-image-1.5 defaults:
-    # input_text:  100 * 5   / 1e6 = 0.0005
-    # input_image: 300 * 10  / 1e6 = 0.003
-    # output_img:  250 * 40  / 1e6 = 0.01
-    assert summary.cost.total_usd == 0.0135
+    # input_text:  100 * 5  / 1e6 = 0.0005
+    # input_image: 300 * 8  / 1e6 = 0.0024
+    # output_img:  250 * 32 / 1e6 = 0.008
+    assert summary.cost.total_usd == 0.0109
 
 
 def test_openai_usage_tracker_image_modal_cached_pricing():
@@ -158,12 +158,12 @@ def test_openai_usage_tracker_image_modal_cached_pricing():
 
     summary = tracker.build_summary()
 
-    # text uncached: 90 * 5 / 1e6 = 0.00045
-    # text cached:   10 * 1.25 / 1e6 = 0.0000125
-    # image uncached:270 * 10 / 1e6 = 0.0027
-    # image cached:   30 * 2.5 / 1e6 = 0.000075
-    # output image:  100 * 40 / 1e6 = 0.004
-    assert summary.cost.total_usd == 0.0072375
+    # text uncached:  90 * 5    / 1e6 = 0.00045
+    # text cached:    10 * 1.25 / 1e6 = 0.0000125
+    # image uncached: 270 * 8   / 1e6 = 0.00216
+    # image cached:   30 * 2    / 1e6 = 0.00006
+    # output image:   100 * 32  / 1e6 = 0.0032
+    assert summary.cost.total_usd == 0.0058825
     assert summary.usage.cached_input_tokens == 40
     assert summary.usage.cached_input_text_tokens == 10
     assert summary.usage.cached_input_image_tokens == 30

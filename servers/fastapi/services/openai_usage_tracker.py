@@ -73,26 +73,26 @@ class _ModelPricing:
 DEFAULT_OPENAI_PRICING: Dict[str, _ModelPricing] = {
     # Reference: OpenAI API pricing pages (token pricing)
     "gpt-5.2": _ModelPricing(
-        input_usd_per_1m=2.0,
-        cached_input_usd_per_1m=0.5,
-        output_usd_per_1m=8.0,
+        input_usd_per_1m=1.75,
+        cached_input_usd_per_1m=0.175,
+        output_usd_per_1m=14.0,
     ),
     "gpt-image-1.5": _ModelPricing(
         input_text_usd_per_1m=5.0,
         cached_input_text_usd_per_1m=1.25,
         output_text_usd_per_1m=10.0,
-        input_image_usd_per_1m=10.0,
-        cached_input_image_usd_per_1m=2.5,
-        output_image_usd_per_1m=40.0,
+        input_image_usd_per_1m=8.0,
+        cached_input_image_usd_per_1m=2.0,
+        output_image_usd_per_1m=32.0,
     ),
     # Backward-compatible alias
     "gpt-image-1": _ModelPricing(
         input_text_usd_per_1m=5.0,
         cached_input_text_usd_per_1m=1.25,
         output_text_usd_per_1m=10.0,
-        input_image_usd_per_1m=10.0,
-        cached_input_image_usd_per_1m=2.5,
-        output_image_usd_per_1m=40.0,
+        input_image_usd_per_1m=8.0,
+        cached_input_image_usd_per_1m=2.0,
+        output_image_usd_per_1m=32.0,
     ),
 }
 
