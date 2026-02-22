@@ -8,6 +8,7 @@ from google import genai
 from openai import NOT_GIVEN, AsyncOpenAI
 from models.image_prompt import ImagePrompt
 from models.sql.image_asset import ImageAsset
+from services.openai_usage_tracker import track_openai_image_usage
 from utils.get_env import (
     get_dall_e_3_quality_env,
     get_gpt_image_1_5_quality_env,
@@ -115,6 +116,9 @@ class ImageGenerationService:
             quality=quality,
             response_format="b64_json" if model == "dall-e-3" else NOT_GIVEN,
             size="1024x1024",
+        )
+        track_openai_image_usage(
+            model=model, usage=result.usage, images_count=len(result.data or [])
         )
         image_path = os.path.join(output_directory, f"{uuid.uuid4()}.png")
         with open(image_path, "wb") as f:

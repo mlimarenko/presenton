@@ -137,6 +137,8 @@ These settings apply to both Docker and the Electron app's backend. You may want
 - **TOOL_CALLS=[Enable/Disable Tool Calls on Custom LLM]**: If **true**, **LLM** will use Tool Call instead of Json Schema for Structured Output.
 - **DISABLE_THINKING=[Enable/Disable Thinking on Custom LLM]**: If **true**, Thinking will be disabled.
 - **WEB_GROUNDING=[Enable/Disable Web Search for OpenAI, Google And Anthropic]**: If **true**, LLM will be able to search web for better results.
+- **TRACK_OPENAI_USAGE=[true/false]**: If **true**, tracks OpenAI usage for presentation generation and returns token/cost summary in `/presentation/generate` response.
+- **OPENAI_PRICING_JSON=[JSON object]**: Optional pricing overrides used for cost estimation. If omitted, built-in defaults are used for `gpt-5.2` and `gpt-image-1.5`.
 
 You can also set the following environment variables to customize the image generation provider and API keys:
 

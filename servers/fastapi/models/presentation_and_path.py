@@ -1,5 +1,9 @@
-from pydantic import BaseModel
 import uuid
+from typing import Optional
+
+from pydantic import BaseModel
+
+from models.openai_usage_cost import OpenAIUsageCostSummary
 
 
 class PresentationAndPath(BaseModel):
@@ -9,3 +13,4 @@ class PresentationAndPath(BaseModel):
 
 class PresentationPathAndEditPath(PresentationAndPath):
     edit_path: str
+    openai_usage: Optional[OpenAIUsageCostSummary] = None

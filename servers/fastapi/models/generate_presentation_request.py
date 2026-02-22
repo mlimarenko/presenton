@@ -40,3 +40,7 @@ class GeneratePresentationRequest(BaseModel):
     trigger_webhook: bool = Field(
         default=False, description="Whether to trigger subscribed webhooks"
     )
+    track_openai_usage: Optional[bool] = Field(
+        default=None,
+        description="Whether to track OpenAI token usage and estimate generation cost",
+    )

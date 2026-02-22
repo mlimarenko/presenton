@@ -101,6 +101,14 @@ def get_web_grounding_env():
     return os.getenv("WEB_GROUNDING")
 
 
+def get_track_openai_usage_env():
+    return os.getenv("TRACK_OPENAI_USAGE")
+
+
+def get_openai_pricing_json_env():
+    return os.getenv("OPENAI_PRICING_JSON")
+
+
 def get_comfyui_url_env():
     return os.getenv("COMFYUI_URL")
 

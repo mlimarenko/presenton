@@ -40,6 +40,10 @@ from models.llm_tool_call import (
 )
 from models.llm_tools import LLMDynamicTool, LLMTool
 from services.llm_tool_calls_handler import LLMToolCallsHandler
+from services.openai_usage_tracker import (
+    track_openai_chat_completion_usage,
+    track_openai_response_usage,
+)
 from utils.async_iterator import iterator_to_async
 from utils.dummy_functions import do_nothing_async
 from utils.get_env import (
@@ -204,6 +208,8 @@ class LLMClient:
             tools=tools,
             extra_body=extra_body,
         )
+        if self.llm_provider == LLMProvider.OPENAI:
+            track_openai_chat_completion_usage(model=model, usage=response.usage)
 
         if len(response.choices) == 0:
             return None
@@ -509,6 +515,8 @@ class LLMClient:
             tools=all_tools,
             extra_body=extra_body,
         )
+        if self.llm_provider == LLMProvider.OPENAI:
+            track_openai_chat_completion_usage(model=model, usage=response.usage)
 
         if len(response.choices) == 0:
             return None
@@ -851,15 +859,21 @@ class LLMClient:
         current_id = None
         current_name = None
         current_arguments = None
-        async for event in await client.chat.completions.create(
+        request_payload = dict(
             model=model,
             messages=[message.model_dump() for message in messages],
             max_completion_tokens=max_tokens,
             tools=tools,
             extra_body=extra_body,
             stream=True,
-        ):
+        )
+        if self.llm_provider == LLMProvider.OPENAI:
+            request_payload["stream_options"] = {"include_usage": True}
+
+        async for event in await client.chat.completions.create(**request_payload):
             event: OpenAIChatCompletionChunk = event
+            if self.llm_provider == LLMProvider.OPENAI and event.usage:
+                track_openai_chat_completion_usage(model=model, usage=event.usage)
             if not event.choices:
                 continue
 
@@ -1184,7 +1198,7 @@ class LLMClient:
         current_arguments = None
 
         has_response_schema_tool_call = False
-        async for event in await client.chat.completions.create(
+        request_payload = dict(
             model=model,
             messages=[message.model_dump() for message in messages],
             max_completion_tokens=max_tokens,
@@ -1205,8 +1219,14 @@ class LLMClient:
             ),
             extra_body=extra_body,
             stream=True,
-        ):
+        )
+        if self.llm_provider == LLMProvider.OPENAI:
+            request_payload["stream_options"] = {"include_usage": True}
+
+        async for event in await client.chat.completions.create(**request_payload):
             event: OpenAIChatCompletionChunk = event
+            if self.llm_provider == LLMProvider.OPENAI and event.usage:
+                track_openai_chat_completion_usage(model=model, usage=event.usage)
             if not event.choices:
                 continue
 
@@ -1583,6 +1603,8 @@ class LLMClient:
             ],
             input=query,
         )
+        if self.llm_provider == LLMProvider.OPENAI:
+            track_openai_response_usage(model=get_model(), usage=response.usage)
         return response.output_text
 
     async def _search_google(self, query: str) -> str:

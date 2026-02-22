@@ -47,10 +47,12 @@ from services.temp_file_service import TEMP_FILE_SERVICE
 from services.concurrent_service import CONCURRENT_SERVICE
 from models.sql.presentation import PresentationModel
 from services.pptx_presentation_creator import PptxPresentationCreator
+from services.openai_usage_tracker import OpenAIUsageTracker
 from models.sql.async_presentation_generation_status import (
     AsyncPresentationGenerationTaskModel,
 )
 from utils.asset_directory_utils import get_exports_directory, get_images_directory
+from utils.get_env import get_track_openai_usage_env
 from utils.llm_calls.generate_presentation_structure import (
     generate_presentation_structure,
 )
@@ -65,6 +67,7 @@ from utils.process_slides import (
     process_slide_add_placeholder_assets,
     process_slide_and_fetch_assets,
 )
+from utils.parsers import parse_bool_or_none
 import uuid
 
 
@@ -493,286 +496,300 @@ async def generate_presentation_handler(
     async_status: Optional[AsyncPresentationGenerationTaskModel],
     sql_session: AsyncSession = Depends(get_async_session),
 ):
+    track_openai_usage = (
+        request.track_openai_usage
+        if request.track_openai_usage is not None
+        else (parse_bool_or_none(get_track_openai_usage_env()) or False)
+    )
+    usage_tracker = OpenAIUsageTracker(enabled=track_openai_usage)
+
     try:
-        using_slides_markdown = False
+        with usage_tracker.activate():
+            using_slides_markdown = False
 
-        if request.slides_markdown:
-            using_slides_markdown = True
-            request.n_slides = len(request.slides_markdown)
+            if request.slides_markdown:
+                using_slides_markdown = True
+                request.n_slides = len(request.slides_markdown)
 
-        if not using_slides_markdown:
-            additional_context = ""
+            if not using_slides_markdown:
+                additional_context = ""
+
+                # Updating async status
+                if async_status:
+                    async_status.message = "Generating presentation outlines"
+                    async_status.updated_at = datetime.now()
+                    sql_session.add(async_status)
+                    await sql_session.commit()
+
+                if request.files:
+                    documents_loader = DocumentsLoader(file_paths=request.files)
+                    await documents_loader.load_documents()
+                    documents = documents_loader.documents
+                    if documents:
+                        additional_context = "\n\n".join(documents)
+
+                # Finding number of slides to generate by considering table of contents
+                n_slides_to_generate = request.n_slides
+                if request.include_table_of_contents:
+                    needed_toc_count = math.ceil(
+                        (
+                            (request.n_slides - 1)
+                            if request.include_title_slide
+                            else request.n_slides
+                        )
+                        / 10
+                    )
+                    n_slides_to_generate -= math.ceil(
+                        (request.n_slides - needed_toc_count) / 10
+                    )
+
+                presentation_outlines_text = ""
+                async for chunk in generate_ppt_outline(
+                    request.content,
+                    n_slides_to_generate,
+                    request.language,
+                    additional_context,
+                    request.tone.value,
+                    request.verbosity.value,
+                    request.instructions,
+                    request.include_title_slide,
+                    request.web_search,
+                ):
+
+                    if isinstance(chunk, HTTPException):
+                        raise chunk
+
+                    presentation_outlines_text += chunk
+
+                try:
+                    presentation_outlines_json = dict(
+                        dirtyjson.loads(presentation_outlines_text)
+                    )
+                except Exception:
+                    traceback.print_exc()
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Failed to generate presentation outlines. Please try again.",
+                    )
+                presentation_outlines = PresentationOutlineModel(
+                    **presentation_outlines_json
+                )
+                total_outlines = n_slides_to_generate
+
+            else:
+                # Setting outlines to slides markdown
+                presentation_outlines = PresentationOutlineModel(
+                    slides=[
+                        SlideOutlineModel(content=slide)
+                        for slide in request.slides_markdown
+                    ]
+                )
+                total_outlines = len(request.slides_markdown)
 
             # Updating async status
             if async_status:
-                async_status.message = "Generating presentation outlines"
+                async_status.message = "Selecting layout for each slide"
                 async_status.updated_at = datetime.now()
                 sql_session.add(async_status)
                 await sql_session.commit()
 
-            if request.files:
-                documents_loader = DocumentsLoader(file_paths=request.files)
-                await documents_loader.load_documents()
-                documents = documents_loader.documents
-                if documents:
-                    additional_context = "\n\n".join(documents)
+            print("-" * 40)
+            print(f"Generated {total_outlines} outlines for the presentation")
 
-            # Finding number of slides to generate by considering table of contents
-            n_slides_to_generate = request.n_slides
-            if request.include_table_of_contents:
-                needed_toc_count = math.ceil(
-                    (
-                        (request.n_slides - 1)
-                        if request.include_title_slide
-                        else request.n_slides
+            # Parse Layouts
+            layout_model = await get_layout_by_name(request.template)
+            total_slide_layouts = len(layout_model.slides)
+
+            # Generate Structure
+            if layout_model.ordered:
+                presentation_structure = layout_model.to_presentation_structure()
+            else:
+                presentation_structure: PresentationStructureModel = (
+                    await generate_presentation_structure(
+                        presentation_outlines,
+                        layout_model,
+                        request.instructions,
+                        using_slides_markdown,
                     )
-                    / 10
-                )
-                n_slides_to_generate -= math.ceil(
-                    (request.n_slides - needed_toc_count) / 10
                 )
 
-            presentation_outlines_text = ""
-            async for chunk in generate_ppt_outline(
-                request.content,
-                n_slides_to_generate,
-                request.language,
-                additional_context,
-                request.tone.value,
-                request.verbosity.value,
-                request.instructions,
-                request.include_title_slide,
-                request.web_search,
-            ):
+            presentation_structure.slides = presentation_structure.slides[:total_outlines]
+            for index in range(total_outlines):
+                random_slide_index = random.randint(0, total_slide_layouts - 1)
+                if index >= total_outlines:
+                    presentation_structure.slides.append(random_slide_index)
+                    continue
+                if presentation_structure.slides[index] >= total_slide_layouts:
+                    presentation_structure.slides[index] = random_slide_index
 
-                if isinstance(chunk, HTTPException):
-                    raise chunk
-
-                presentation_outlines_text += chunk
-
-            try:
-                presentation_outlines_json = dict(
-                    dirtyjson.loads(presentation_outlines_text)
+            # Injecting table of contents to the presentation structure and outlines
+            if request.include_table_of_contents and not using_slides_markdown:
+                n_toc_slides = request.n_slides - total_outlines
+                toc_slide_layout_index = select_toc_or_list_slide_layout_index(
+                    layout_model
                 )
-            except Exception:
-                traceback.print_exc()
-                raise HTTPException(
-                    status_code=400,
-                    detail="Failed to generate presentation outlines. Please try again.",
-                )
-            presentation_outlines = PresentationOutlineModel(
-                **presentation_outlines_json
-            )
-            total_outlines = n_slides_to_generate
+                if toc_slide_layout_index != -1:
+                    outline_index = 1 if request.include_title_slide else 0
+                    for i in range(n_toc_slides):
+                        outlines_to = outline_index + 10
+                        if total_outlines == outlines_to:
+                            outlines_to -= 1
 
-        else:
-            # Setting outlines to slides markdown
-            presentation_outlines = PresentationOutlineModel(
-                slides=[
-                    SlideOutlineModel(content=slide)
-                    for slide in request.slides_markdown
-                ]
-            )
-            total_outlines = len(request.slides_markdown)
-
-        # Updating async status
-        if async_status:
-            async_status.message = "Selecting layout for each slide"
-            async_status.updated_at = datetime.now()
-            sql_session.add(async_status)
-            await sql_session.commit()
-
-        print("-" * 40)
-        print(f"Generated {total_outlines} outlines for the presentation")
-
-        # Parse Layouts
-        layout_model = await get_layout_by_name(request.template)
-        total_slide_layouts = len(layout_model.slides)
-
-        # Generate Structure
-        if layout_model.ordered:
-            presentation_structure = layout_model.to_presentation_structure()
-        else:
-            presentation_structure: PresentationStructureModel = (
-                await generate_presentation_structure(
-                    presentation_outlines,
-                    layout_model,
-                    request.instructions,
-                    using_slides_markdown,
-                )
-            )
-
-        presentation_structure.slides = presentation_structure.slides[:total_outlines]
-        for index in range(total_outlines):
-            random_slide_index = random.randint(0, total_slide_layouts - 1)
-            if index >= total_outlines:
-                presentation_structure.slides.append(random_slide_index)
-                continue
-            if presentation_structure.slides[index] >= total_slide_layouts:
-                presentation_structure.slides[index] = random_slide_index
-
-        # Injecting table of contents to the presentation structure and outlines
-        if request.include_table_of_contents and not using_slides_markdown:
-            n_toc_slides = request.n_slides - total_outlines
-            toc_slide_layout_index = select_toc_or_list_slide_layout_index(layout_model)
-            if toc_slide_layout_index != -1:
-                outline_index = 1 if request.include_title_slide else 0
-                for i in range(n_toc_slides):
-                    outlines_to = outline_index + 10
-                    if total_outlines == outlines_to:
-                        outlines_to -= 1
-
-                    presentation_structure.slides.insert(
-                        i + 1 if request.include_title_slide else i,
-                        toc_slide_layout_index,
-                    )
-                    toc_outline = "Table of Contents\n\n"
-
-                    for outline in presentation_outlines.slides[
-                        outline_index:outlines_to
-                    ]:
-                        page_number = (
-                            outline_index - i + n_toc_slides + 1
-                            if request.include_title_slide
-                            else outline_index - i + n_toc_slides
+                        presentation_structure.slides.insert(
+                            i + 1 if request.include_title_slide else i,
+                            toc_slide_layout_index,
                         )
-                        toc_outline += f"Slide page number: {page_number}\n Slide Content: {outline.content[:100]}\n\n"
+                        toc_outline = "Table of Contents\n\n"
+
+                        for outline in presentation_outlines.slides[
+                            outline_index:outlines_to
+                        ]:
+                            page_number = (
+                                outline_index - i + n_toc_slides + 1
+                                if request.include_title_slide
+                                else outline_index - i + n_toc_slides
+                            )
+                            toc_outline += f"Slide page number: {page_number}\n Slide Content: {outline.content[:100]}\n\n"
+                            outline_index += 1
+
                         outline_index += 1
 
-                    outline_index += 1
+                        presentation_outlines.slides.insert(
+                            i + 1 if request.include_title_slide else i,
+                            SlideOutlineModel(
+                                content=toc_outline,
+                            ),
+                        )
 
-                    presentation_outlines.slides.insert(
-                        i + 1 if request.include_title_slide else i,
-                        SlideOutlineModel(
-                            content=toc_outline,
-                        ),
+            # Create PresentationModel
+            presentation = PresentationModel(
+                id=presentation_id,
+                content=request.content,
+                n_slides=request.n_slides,
+                language=request.language,
+                title=get_presentation_title_from_outlines(presentation_outlines),
+                outlines=presentation_outlines.model_dump(),
+                layout=layout_model.model_dump(),
+                structure=presentation_structure.model_dump(),
+                tone=request.tone.value,
+                verbosity=request.verbosity.value,
+                instructions=request.instructions,
+            )
+
+            # Updating async status
+            if async_status:
+                async_status.message = "Generating slides"
+                async_status.updated_at = datetime.now()
+                sql_session.add(async_status)
+                await sql_session.commit()
+
+            image_generation_service = ImageGenerationService(get_images_directory())
+            async_assets_generation_tasks = []
+
+            # 7. Generate slide content concurrently (batched), then build slides and fetch assets
+            slides: List[SlideModel] = []
+
+            slide_layout_indices = presentation_structure.slides
+            slide_layouts = [layout_model.slides[idx] for idx in slide_layout_indices]
+
+            # Schedule slide content generation and asset fetching in batches of 10
+            batch_size = 10
+            for start in range(0, len(slide_layouts), batch_size):
+                end = min(start + batch_size, len(slide_layouts))
+
+                print(f"Generating slides from {start} to {end}")
+
+                # Generate contents for this batch concurrently
+                content_tasks = [
+                    get_slide_content_from_type_and_outline(
+                        slide_layouts[i],
+                        presentation_outlines.slides[i],
+                        request.language,
+                        request.tone.value,
+                        request.verbosity.value,
+                        request.instructions,
                     )
+                    for i in range(start, end)
+                ]
+                batch_contents: List[dict] = await asyncio.gather(*content_tasks)
 
-        # Create PresentationModel
-        presentation = PresentationModel(
-            id=presentation_id,
-            content=request.content,
-            n_slides=request.n_slides,
-            language=request.language,
-            title=get_presentation_title_from_outlines(presentation_outlines),
-            outlines=presentation_outlines.model_dump(),
-            layout=layout_model.model_dump(),
-            structure=presentation_structure.model_dump(),
-            tone=request.tone.value,
-            verbosity=request.verbosity.value,
-            instructions=request.instructions,
-        )
+                # Build slides for this batch
+                batch_slides: List[SlideModel] = []
+                for offset, slide_content in enumerate(batch_contents):
+                    i = start + offset
+                    slide_layout = slide_layouts[i]
+                    slide = SlideModel(
+                        presentation=presentation_id,
+                        layout_group=layout_model.name,
+                        layout=slide_layout.id,
+                        index=i,
+                        speaker_note=slide_content.get("__speaker_note__"),
+                        content=slide_content,
+                    )
+                    slides.append(slide)
+                    batch_slides.append(slide)
 
-        # Updating async status
-        if async_status:
-            async_status.message = "Generating slides"
-            async_status.updated_at = datetime.now()
-            sql_session.add(async_status)
+                # Start asset fetch tasks for just-generated slides so they run while next batch is processed
+                asset_tasks = [
+                    process_slide_and_fetch_assets(image_generation_service, slide)
+                    for slide in batch_slides
+                ]
+                async_assets_generation_tasks.extend(asset_tasks)
+
+            if async_status:
+                async_status.message = "Fetching assets for slides"
+                async_status.updated_at = datetime.now()
+                sql_session.add(async_status)
+                await sql_session.commit()
+
+            # Run all asset tasks concurrently while batches may still be generating content
+            generated_assets_list = await asyncio.gather(*async_assets_generation_tasks)
+            generated_assets = []
+            for assets_list in generated_assets_list:
+                generated_assets.extend(assets_list)
+
+            # 8. Save PresentationModel and Slides
+            sql_session.add(presentation)
+            sql_session.add_all(slides)
+            sql_session.add_all(generated_assets)
             await sql_session.commit()
 
-        image_generation_service = ImageGenerationService(get_images_directory())
-        async_assets_generation_tasks = []
+            if async_status:
+                async_status.message = "Exporting presentation"
+                async_status.updated_at = datetime.now()
+                sql_session.add(async_status)
 
-        # 7. Generate slide content concurrently (batched), then build slides and fetch assets
-        slides: List[SlideModel] = []
+            # 9. Export
+            presentation_and_path = await export_presentation(
+                presentation_id,
+                presentation.title or str(uuid.uuid4()),
+                request.export_as,
+            )
 
-        slide_layout_indices = presentation_structure.slides
-        slide_layouts = [layout_model.slides[idx] for idx in slide_layout_indices]
+            response = PresentationPathAndEditPath(
+                **presentation_and_path.model_dump(),
+                edit_path=f"/presentation?id={presentation_id}",
+            )
+            if track_openai_usage:
+                response.openai_usage = usage_tracker.build_summary()
 
-        # Schedule slide content generation and asset fetching in batches of 10
-        batch_size = 10
-        for start in range(0, len(slide_layouts), batch_size):
-            end = min(start + batch_size, len(slide_layouts))
+            if async_status:
+                async_status.message = "Presentation generation completed"
+                async_status.status = "completed"
+                async_status.data = response.model_dump(mode="json")
+                async_status.updated_at = datetime.now()
+                sql_session.add(async_status)
+                await sql_session.commit()
 
-            print(f"Generating slides from {start} to {end}")
+            # Triggering webhook on success
+            CONCURRENT_SERVICE.run_task(
+                None,
+                WebhookService.send_webhook,
+                WebhookEvent.PRESENTATION_GENERATION_COMPLETED,
+                response.model_dump(mode="json"),
+            )
 
-            # Generate contents for this batch concurrently
-            content_tasks = [
-                get_slide_content_from_type_and_outline(
-                    slide_layouts[i],
-                    presentation_outlines.slides[i],
-                    request.language,
-                    request.tone.value,
-                    request.verbosity.value,
-                    request.instructions,
-                )
-                for i in range(start, end)
-            ]
-            batch_contents: List[dict] = await asyncio.gather(*content_tasks)
-
-            # Build slides for this batch
-            batch_slides: List[SlideModel] = []
-            for offset, slide_content in enumerate(batch_contents):
-                i = start + offset
-                slide_layout = slide_layouts[i]
-                slide = SlideModel(
-                    presentation=presentation_id,
-                    layout_group=layout_model.name,
-                    layout=slide_layout.id,
-                    index=i,
-                    speaker_note=slide_content.get("__speaker_note__"),
-                    content=slide_content,
-                )
-                slides.append(slide)
-                batch_slides.append(slide)
-
-            # Start asset fetch tasks for just-generated slides so they run while next batch is processed
-            asset_tasks = [
-                process_slide_and_fetch_assets(image_generation_service, slide)
-                for slide in batch_slides
-            ]
-            async_assets_generation_tasks.extend(asset_tasks)
-
-        if async_status:
-            async_status.message = "Fetching assets for slides"
-            async_status.updated_at = datetime.now()
-            sql_session.add(async_status)
-            await sql_session.commit()
-
-        # Run all asset tasks concurrently while batches may still be generating content
-        generated_assets_list = await asyncio.gather(*async_assets_generation_tasks)
-        generated_assets = []
-        for assets_list in generated_assets_list:
-            generated_assets.extend(assets_list)
-
-        # 8. Save PresentationModel and Slides
-        sql_session.add(presentation)
-        sql_session.add_all(slides)
-        sql_session.add_all(generated_assets)
-        await sql_session.commit()
-
-        if async_status:
-            async_status.message = "Exporting presentation"
-            async_status.updated_at = datetime.now()
-            sql_session.add(async_status)
-
-        # 9. Export
-        presentation_and_path = await export_presentation(
-            presentation_id, presentation.title or str(uuid.uuid4()), request.export_as
-        )
-
-        response = PresentationPathAndEditPath(
-            **presentation_and_path.model_dump(),
-            edit_path=f"/presentation?id={presentation_id}",
-        )
-
-        if async_status:
-            async_status.message = "Presentation generation completed"
-            async_status.status = "completed"
-            async_status.data = response.model_dump(mode="json")
-            async_status.updated_at = datetime.now()
-            sql_session.add(async_status)
-            await sql_session.commit()
-
-        # Triggering webhook on success
-        CONCURRENT_SERVICE.run_task(
-            None,
-            WebhookService.send_webhook,
-            WebhookEvent.PRESENTATION_GENERATION_COMPLETED,
-            response.model_dump(mode="json"),
-        )
-
-        return response
+            return response
 
     except Exception as e:
         if not isinstance(e, HTTPException):
